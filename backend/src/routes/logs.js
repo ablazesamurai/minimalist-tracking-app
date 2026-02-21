@@ -16,10 +16,16 @@
 //   POST   = "save new data" (creating)
 //   DELETE = "remove data" (deleting)
 //
-// NOTE ABOUT node:sqlite:
-// Node.js v22+ has a built-in SQLite module (node:sqlite).
-// Its StatementSync methods return BigInt numbers (e.g., 0n instead of 0).
-// We convert them with Number() where needed.
+// NOTE ABOUT ASYNC/AWAIT:
+// Turso (our cloud database) is ASYNCHRONOUS — operations don't return
+// results immediately. Instead they return a "Promise" (a future result).
+// We use "async function" + "await" to wait for the result before continuing.
+//
+// Example:
+//   const result = await db.execute('SELECT ...');  ← waits until done
+//   console.log(result.rows);                       ← now result is ready
+//
+// This is different from the old node:sqlite which was synchronous (instant).
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,23 +47,19 @@ function isValidDate(dateStr) {
 // ─── ROUTE 1: GET ALL LOGS ────────────────────────────────────────────────────
 // GET /api/logs
 // Returns all activity logs, newest first.
-router.get('/', function(req, res) {
+router.get('/', async function(req, res) {
   try {
-    // SQL: SELECT all rows from activity_logs, sorted by date descending (newest first)
-    const logs = db.prepare(`
+    // db.execute() sends a SQL query to Turso and returns a Promise.
+    // "await" pauses here until the result comes back from the cloud.
+    const result = await db.execute(`
       SELECT id, date, activity, created_at
       FROM activity_logs
       ORDER BY date DESC
-    `).all();
+    `);
 
-    // Convert any BigInt id values to regular numbers for JSON serialization
-    // (JSON.stringify can't handle BigInt natively)
-    const safeLogs = logs.map(log => ({
-      ...log,
-      id: Number(log.id),
-    }));
-
-    res.status(200).json({ success: true, data: safeLogs });
+    // result.rows is an array of row objects, e.g.:
+    // [{ id: 1, date: "2024-01-15", activity: "shampoo", created_at: "..." }, ...]
+    res.status(200).json({ success: true, data: result.rows });
   } catch (error) {
     console.error('Error fetching logs:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch activity logs' });
@@ -68,7 +70,7 @@ router.get('/', function(req, res) {
 // POST /api/logs
 // Body: { "date": "2024-01-15", "activity": "shampoo" }
 // If a log already exists for that date+activity, returns the existing one.
-router.post('/', function(req, res) {
+router.post('/', async function(req, res) {
   try {
     const { date, activity } = req.body;
 
@@ -96,34 +98,40 @@ router.post('/', function(req, res) {
 
     const cleanActivity = activity.trim().toLowerCase();
 
-    // INSERT OR IGNORE: insert the row, but silently skip if date+activity already exists
-    // The "?" are placeholders filled with our values (prevents SQL injection attacks)
-    const stmt   = db.prepare('INSERT OR IGNORE INTO activity_logs (date, activity) VALUES (?, ?)');
-    const result = stmt.run(date, cleanActivity);
+    // Try to insert the new log.
+    // INSERT OR IGNORE = silently skip if date+activity already exists (no crash).
+    // The "?" placeholders are filled with our values safely (prevents SQL injection).
+    const insertResult = await db.execute({
+      sql: 'INSERT OR IGNORE INTO activity_logs (date, activity) VALUES (?, ?)',
+      args: [date, cleanActivity],
+    });
 
-    // result.changes is a BigInt in node:sqlite → convert to Number
-    if (Number(result.changes) === 0) {
+    // insertResult.rowsAffected tells us how many rows were inserted.
+    // If 0, the log already existed (IGNORE skipped the insert).
+    if (insertResult.rowsAffected === 0) {
       // Log already existed — find and return the existing row
-      const existing = db.prepare(
-        'SELECT id, date, activity, created_at FROM activity_logs WHERE date = ? AND activity = ?'
-      ).get(date, cleanActivity);
+      const existing = await db.execute({
+        sql: 'SELECT id, date, activity, created_at FROM activity_logs WHERE date = ? AND activity = ?',
+        args: [date, cleanActivity],
+      });
 
       return res.status(200).json({
         success: true,
         message: 'Log already exists for this date and activity',
-        data: { ...existing, id: Number(existing.id) }
+        data: existing.rows[0],
       });
     }
 
     // Get the newly created row using the auto-generated ID
-    // result.lastInsertRowid is a BigInt in node:sqlite
-    const newLog = db.prepare(
-      'SELECT id, date, activity, created_at FROM activity_logs WHERE id = ?'
-    ).get(Number(result.lastInsertRowid));
+    // insertResult.lastInsertRowid is the ID of the row we just created
+    const newLog = await db.execute({
+      sql: 'SELECT id, date, activity, created_at FROM activity_logs WHERE id = ?',
+      args: [Number(insertResult.lastInsertRowid)],
+    });
 
     res.status(201).json({
       success: true,
-      data: { ...newLog, id: Number(newLog.id) }
+      data: newLog.rows[0],
     });
   } catch (error) {
     console.error('Error adding log:', error);
@@ -135,7 +143,7 @@ router.post('/', function(req, res) {
 // DELETE /api/logs/:date/:activity
 // Example: DELETE /api/logs/2024-01-15/shampoo
 // The :date and :activity are URL parameters filled in with real values.
-router.delete('/:date/:activity', function(req, res) {
+router.delete('/:date/:activity', async function(req, res) {
   try {
     const { date, activity } = req.params;
 
@@ -146,11 +154,12 @@ router.delete('/:date/:activity', function(req, res) {
       });
     }
 
-    const result = db.prepare(
-      'DELETE FROM activity_logs WHERE date = ? AND activity = ?'
-    ).run(date, activity.toLowerCase());
+    const result = await db.execute({
+      sql: 'DELETE FROM activity_logs WHERE date = ? AND activity = ?',
+      args: [date, activity.toLowerCase()],
+    });
 
-    if (Number(result.changes) === 0) {
+    if (result.rowsAffected === 0) {
       return res.status(404).json({
         success: false,
         error: 'No log found for the given date and activity'
@@ -170,12 +179,12 @@ router.delete('/:date/:activity', function(req, res) {
 // ─── ROUTE 4: DELETE ALL LOGS ─────────────────────────────────────────────────
 // DELETE /api/logs
 // Deletes every single row from the table (used by "Clear All Data" in Settings).
-router.delete('/', function(req, res) {
+router.delete('/', async function(req, res) {
   try {
-    const result = db.prepare('DELETE FROM activity_logs').run();
+    const result = await db.execute('DELETE FROM activity_logs');
     res.status(200).json({
       success: true,
-      message: `Deleted all ${Number(result.changes)} activity logs`
+      message: `Deleted all ${result.rowsAffected} activity logs`
     });
   } catch (error) {
     console.error('Error clearing logs:', error);
@@ -191,7 +200,7 @@ router.delete('/', function(req, res) {
 //   year  = which year (e.g., 2024). Defaults to current year if not provided.
 //   month = which month 1-12. Defaults to current month if not provided.
 //
-router.get('/stats/month', function(req, res) {
+router.get('/stats/month', async function(req, res) {
   try {
     const now   = new Date();
     const year  = parseInt(req.query.year)  || now.getFullYear();
@@ -203,14 +212,18 @@ router.get('/stats/month', function(req, res) {
     const endDate   = `${year}-${monthStr}-31`;  // Safe: SQLite date comparison handles this
 
     // Get all shampoo logs for this month, oldest first (for gap calculation)
-    const monthLogs = db.prepare(`
-      SELECT date FROM activity_logs
-      WHERE activity = 'shampoo'
-        AND date >= ? AND date <= ?
-      ORDER BY date ASC
-    `).all(startDate, endDate);
+    const result = await db.execute({
+      sql: `
+        SELECT date FROM activity_logs
+        WHERE activity = 'shampoo'
+          AND date >= ? AND date <= ?
+        ORDER BY date ASC
+      `,
+      args: [startDate, endDate],
+    });
 
-    const totalWashes = monthLogs.length;
+    const monthLogs    = result.rows;
+    const totalWashes  = monthLogs.length;
 
     // Calculate average days between washes
     // Example: washes on 1st, 4th, 10th → gaps are 3 and 6 → average = 4.5 → rounded to 5
