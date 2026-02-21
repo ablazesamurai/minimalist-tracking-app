@@ -21,8 +21,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Import icons from the lucide-react library
-// Sparkles = ✨ sparkles icon, Calendar = 📅 calendar icon
-import { Sparkles, Calendar as CalendarIcon } from 'lucide-react';
+// Sparkles = ✨ sparkles icon, Calendar = 📅 calendar icon, Plus = ➕ add icon
+import { Sparkles, Calendar as CalendarIcon, Plus } from 'lucide-react';
+
+// useState lets us track local UI state like "is the past-date form open?"
+import { useState } from 'react';
 
 // Import our custom hook to access activity data and functions
 import { useActivity } from '../context/ActivityContext';
@@ -52,6 +55,37 @@ export function Home() {
   // ── Check if today is already logged ──
   const today = new Date();
   const isTodayLogged = isDateLogged(today);
+
+  // ── State for the "Log Past Date" section ──
+  // Controls whether the past-date form is visible
+  const [showPastDateForm, setShowPastDateForm] = useState(false);
+
+  // The date the user picked in the date input (starts as yesterday)
+  const getYesterdayStr = () => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    // Format as YYYY-MM-DD using local timezone parts
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const [pastDate, setPastDate] = useState<string>(getYesterdayStr());
+
+  // Whether the currently selected past date already has a log
+  const isPastDateLogged = isDateLogged(new Date(pastDate + 'T12:00:00'));
+
+  // ── Handle logging a past date ──
+  const handlePastDateLog = async () => {
+    if (isPastDateLogged) {
+      // Toggle: remove the log if it already exists
+      await deleteLog(pastDate, 'shampoo');
+    } else {
+      await addLog(pastDate, 'shampoo');
+    }
+    // Collapse the form after action
+    setShowPastDateForm(false);
+  };
 
   // ── Handle the "Shampooed Today" button click ──
   // This is an "async" function because addLog talks to the server.
@@ -171,6 +205,75 @@ export function Home() {
               }
             </span>
           </button>
+        </div>
+      </div>
+
+      {/* ── Log a Past Date Card ── */}
+      <div className="px-6 mb-6">
+        <div className="bg-white rounded-3xl p-6 shadow-sm">
+          {/* Header row — tap to expand/collapse the form */}
+          <button
+            onClick={() => setShowPastDateForm(prev => !prev)}
+            className="w-full flex items-center justify-between"
+          >
+            <div>
+              <h2 className="text-xl text-neutral-800 mb-1 text-left">Log a Past Date</h2>
+              <p className="text-sm text-neutral-500 text-left">Remembered a missed wash?</p>
+            </div>
+            {/* Rotate the + icon 45° when form is open (makes it look like ✕) */}
+            <div
+              className={`w-12 h-12 bg-[#CCE3DE] rounded-full flex items-center justify-center transition-transform ${showPastDateForm ? 'rotate-45' : ''}`}
+            >
+              <Plus size={24} className="text-[#6B9080]" />
+            </div>
+          </button>
+
+          {/* The form — only shown when showPastDateForm is true */}
+          {showPastDateForm && (
+            <div className="mt-4">
+              {/* Date picker input */}
+              <input
+                type="date"
+                value={pastDate}
+                // Don't allow selecting today (that's what Quick Log is for) or future dates
+                max={(() => {
+                  // Yesterday's date as YYYY-MM-DD
+                  const y = new Date();
+                  y.setDate(y.getDate() - 1);
+                  return `${y.getFullYear()}-${String(y.getMonth()+1).padStart(2,'0')}-${String(y.getDate()).padStart(2,'0')}`;
+                })()}
+                onChange={e => setPastDate(e.target.value)}
+                className="w-full border border-neutral-200 rounded-2xl px-4 py-3 text-neutral-800 text-base mb-4 focus:outline-none focus:border-[#6B9080]"
+              />
+
+              {/* Show whether this date is already logged */}
+              {isPastDateLogged && (
+                <p className="text-sm text-[#6B9080] mb-3">
+                  ✓ Already logged for this date — tap below to remove it.
+                </p>
+              )}
+
+              {/* Submit button */}
+              <button
+                onClick={handlePastDateLog}
+                disabled={isLoading || !pastDate}
+                className={`w-full text-white py-4 rounded-2xl transition-all shadow-md text-lg
+                  ${isPastDateLogged
+                    ? 'bg-gradient-to-r from-red-400 to-red-500'
+                    : 'bg-gradient-to-r from-[#6B9080] to-[#A4C3B2]'
+                  }
+                  ${isLoading ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'}
+                `}
+              >
+                {isLoading
+                  ? 'Saving...'
+                  : isPastDateLogged
+                    ? 'Remove This Log'
+                    : 'Log This Date'
+                }
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
